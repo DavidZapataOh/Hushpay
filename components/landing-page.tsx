@@ -5,12 +5,17 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { ArrowRight, Shield, Users, Zap, Lock, Eye, Smartphone, CheckCircle, Star, Quote } from "lucide-react"
 import Link from "next/link"
 import { useState, useEffect } from "react"
-import { usePrivy } from '@privy-io/react-auth'
+import { usePrivy, useWallets } from '@privy-io/react-auth'
 
 export function LandingPage() {
   const [currentTestimonial, setCurrentTestimonial] = useState(0)
   const [animationPhase, setAnimationPhase] = useState(0)
   const { login, logout, authenticated, user, ready } = usePrivy()
+  const { wallets } = useWallets();
+  
+  // **CAMBIADO: Usar la wallet conectada en lugar de la embebida**
+  const connectedWallet = wallets.find(wallet => wallet.type === 'ethereum');
+  const displayAddress = connectedWallet?.address || user?.wallet?.address;
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -81,8 +86,8 @@ export function LandingPage() {
                   {authenticated ? (
                     <div className="flex items-center space-x-3">
                       <span className="text-sm text-muted-foreground">
-                        {user?.wallet?.address ? 
-                          `${user.wallet.address.slice(0, 6)}...${user.wallet.address.slice(-4)}` : 
+                        {displayAddress ? 
+                          `${displayAddress.slice(0, 6)}...${displayAddress.slice(-4)}` : 
                           'Connected'
                         }
                       </span>

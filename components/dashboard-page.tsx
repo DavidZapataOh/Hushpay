@@ -1,8 +1,7 @@
 "use client"
 
 import type React from "react"
-
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -31,662 +30,778 @@ import {
   Clock,
   AlertCircle,
   CheckCircle2,
+  RefreshCw,
+  Zap,
 } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { WalletConnectButton } from "@/components/wallet-connect-button"
+import { usePrivy, useWallets } from '@privy-io/react-auth'
+import { useTokenBalance } from "@/lib/hooks/useTokenBalance"
+import { useConfidentialTransfer } from "@/lib/hooks/useConfidentialTransfer"
+import { useAuditors } from "@/lib/hooks/useAuditors"
+import { TOKEN_ADDRESSES } from "@/lib/constants"
+import { toast } from "sonner"
+import { useFhevmContext } from "@/app/FhevmProvider"
 
-// Mock data for eTokens
-const mockETokens = [
+// Token configuration
+const TOKENS = [
   {
-    id: "1",
+    id: "eUSDC",
     name: "eUSDC",
     originalToken: "USDC",
-    balance: "1,250.00",
-    isBalanceVisible: false,
+    address: TOKEN_ADDRESSES.sepolia.eUSDC,
+    decimals: 6,
   },
   {
-    id: "2",
+    id: "eUSDT", 
     name: "eUSDT",
     originalToken: "USDT",
-    balance: "850.50",
-    isBalanceVisible: false,
+    address: TOKEN_ADDRESSES.sepolia.eUSDT,
+    decimals: 6,
   },
   {
-    id: "3",
-    name: "eWETH",
+    id: "eWETH",
+    name: "eWETH", 
     originalToken: "WETH",
-    balance: "2.45",
-    isBalanceVisible: false,
+    address: TOKEN_ADDRESSES.sepolia.eWETH,
+    decimals: 18,
   },
-]
-
-// Mock auditors
-const mockAuditors = [
-  { address: "0x1234...5678", name: "Auditor Principal" },
-  { address: "0xabcd...efgh", name: "Auditor Secundario" },
 ]
 
 export function DashboardPage() {
-  const [eTokens, setETokens] = useState(mockETokens)
-  const [auditors, setAuditors] = useState(mockAuditors)
-  const [publicKey, setPublicKey] = useState("")
-  const [sendAmount, setSendAmount] = useState("")
-  const [sendAddress, setSendAddress] = useState("")
-  const [batchTransfers, setBatchTransfers] = useState([{ address: "", amount: "" }])
-  const [newAuditorAddress, setNewAuditorAddress] = useState("")
-  const [csvFile, setCsvFile] = useState<File | null>(null)
-  const [csvData, setCsvData] = useState<Array<{ address: string; amount: string }>>([])
-  const [csvError, setCsvError] = useState("")
+  const { user, authenticated } = usePrivy()
+  const { wallets } = useWallets();
+  const { instance, isInitialized, isLoading: fhevmLoading, error: fhevmError } = useFhevmContext()
+  
+  // **CAMBIADO: Usar la wallet conectada en lugar de la embebida**
+  const connectedWallet = wallets.find(wallet => wallet.type === 'ethereum');
+  const userAddress = connectedWallet?.address;
+  
+  // **DEBUG: Log de direcciones**
+  console.log("🔍 Dashboard addresses:", {
+    userWalletAddress: user?.wallet?.address,
+    connectedWalletAddress: connectedWallet?.address || "no connected wallet",
+    finalUserAddress: userAddress
+  });
+
+  const router = useRouter()
+
+  // State for transfer modal
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false)
   const [transferStep, setTransferStep] = useState(0)
   const [transferStatus, setTransferStatus] = useState<"idle" | "processing" | "success" | "error">("idle")
   const [transferError, setTransferError] = useState("")
-  const [selectedToken, setSelectedToken] = useState<(typeof mockETokens)[0] | null>(null)
-  const router = useRouter()
+  const [selectedToken, setSelectedToken] = useState<typeof TOKENS[0] | null>(null)
+  
+  // State for transfer form
+  const [sendAmount, setSendAmount] = useState("")
+  const [sendAddress, setSendAddress] = useState("")
+  const [batchTransfers, setBatchTransfers] = useState([{ address: "", amount: "" }])
+  const [csvFile, setCsvFile] = useState<File | null>(null)
+  const [csvData, setCsvData] = useState<Array<{ address: string; amount: string }>>([])
+  const [csvError, setCsvError] = useState("")
 
-  const toggleBalanceVisibility = (id: string, publicKey: string) => {
-    if (!publicKey.trim()) return
+  // State for auditors
+  const [newAuditorAddress, setNewAuditorAddress] = useState("")
 
-    setETokens((tokens) =>
-      tokens.map((token) => (token.id === id ? { ...token, isBalanceVisible: !token.isBalanceVisible } : token)),
-    )
-    setPublicKey("")
-  }
+  // Hooks
+  const { transfer, isEncrypting, isConfirming, isConfirmed, hash, resetTransfer } = useConfidentialTransfer()
+  const { auditors, addAuditor, removeAuditor, isLoading: auditorsLoading } = useAuditors(
+    authenticated && connectedWallet ? TOKEN_ADDRESSES.sepolia.eUSDC : ""
+  )
 
-  const addBatchTransfer = () => {
-    setBatchTransfers([...batchTransfers, { address: "", amount: "" }])
-  }
+  // Token balances - solo habilitar cuando hay wallet conectada
+  const eUSDCBalance = useTokenBalance({
+    address: userAddress, // **CAMBIADO: Usar wallet conectada**
+    tokenAddress: TOKEN_ADDRESSES.sepolia.eUSDC,
+    isConfidential: true,
+    enabled: authenticated && !!userAddress && !!connectedWallet && isInitialized && !!instance,
+  })
 
-  const removeBatchTransfer = (index: number) => {
-    setBatchTransfers(batchTransfers.filter((_, i) => i !== index))
-  }
+  const eUSDTBalance = useTokenBalance({
+    address: userAddress,
+    tokenAddress: TOKEN_ADDRESSES.sepolia.eUSDT,
+    isConfidential: true,
+    enabled: authenticated && !!userAddress && !!connectedWallet && isInitialized && !!instance,
+  })
 
-  const updateBatchTransfer = (index: number, field: "address" | "amount", value: string) => {
-    setBatchTransfers((transfers) =>
-      transfers.map((transfer, i) => (i === index ? { ...transfer, [field]: value } : transfer)),
-    )
-  }
+  const eWETHBalance = useTokenBalance({
+    address: userAddress,
+    tokenAddress: TOKEN_ADDRESSES.sepolia.eWETH,
+    isConfidential: true,
+    enabled: authenticated && !!userAddress && !!connectedWallet && isInitialized && !!instance,
+  })
 
-  const addAuditor = () => {
-    if (newAuditorAddress.trim()) {
-      setAuditors([
-        ...auditors,
-        {
-          address: newAuditorAddress,
-          name: `Auditor ${auditors.length + 1}`,
-        },
-      ])
-      setNewAuditorAddress("")
+  const tokenBalances = [
+    { ...TOKENS[0], balance: eUSDCBalance },
+    { ...TOKENS[1], balance: eUSDTBalance },
+    { ...TOKENS[2], balance: eWETHBalance },
+  ]
+
+  // Redirect if not authenticated
+  useEffect(() => {
+    if (!authenticated) {
+      router.push('/')
+    }
+  }, [authenticated, router])
+
+  // Ensure we're on Sepolia for FHEVM operations - solo mostrar advertencia, no cambiar automáticamente
+  useEffect(() => {
+    if (authenticated && connectedWallet) {
+      const currentChainId = connectedWallet.chainId;
+      
+      // Solo mostrar advertencia si no está en la red correcta
+      if (currentChainId !== "11155111") {
+        console.log("⚠️ User is not on Ethereum Sepolia (11155111). Current chain:", currentChainId);
+        toast.warning("Please switch to Ethereum Sepolia network (11155111) for eToken operations", {
+          duration: 5000,
+        });
+      }
+    }
+  }, [authenticated, connectedWallet]);
+
+  const toggleBalanceVisibility = async (tokenId: string) => {
+    const tokenBalance = tokenBalances.find(t => t.id === tokenId)
+    if (!tokenBalance) return
+    
+    try {
+      if (tokenBalance.balance.decryptedBalance !== null) {
+        tokenBalance.balance.hide()
+        toast.success('Balance hidden successfully!')
+      } else {
+        await tokenBalance.balance.decrypt()
+        toast.success('Balance decrypted successfully!')
+      }
+    } catch (error) {
+      console.error('Error decrypting balance:', error)
+      
+      if (error instanceof Error && error.message.includes('not authorized')) {
+        toast.error('You need to set yourself as an auditor first. Please try the "Setup Auditor Permissions" button below.')
+      } else {
+        toast.error('Failed to decrypt balance')
+      }
     }
   }
 
-  const removeAuditor = (address: string) => {
-    setAuditors(auditors.filter((auditor) => auditor.address !== address))
-  }
-
-  const handleCsvUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-
-    if (!file.name.endsWith(".csv")) {
-      setCsvError("Please upload a CSV file")
+  const handleTransfer = async () => {
+    if (!selectedToken || !sendAmount || !sendAddress) {
+      toast.error('Please fill in all fields')
       return
     }
 
-    setCsvFile(file)
-    setCsvError("")
+    if (!sendAddress.startsWith('0x') || sendAddress.length !== 42) {
+      toast.error('Please enter a valid Ethereum address')
+      return
+    }
+
+    setTransferStatus('processing')
+    setTransferError('')
+
+    try {
+      const success = await transfer(
+        selectedToken.address,
+        sendAmount,
+        sendAddress,
+        selectedToken.decimals
+      )
+
+      if (success) {
+        setTransferStatus('success')
+        setIsTransferModalOpen(false)
+        setSendAmount('')
+        setSendAddress('')
+        resetTransfer()
+      } else {
+        setTransferStatus('error')
+        setTransferError('Transfer failed')
+      }
+    } catch (error) {
+      console.error('Transfer error:', error)
+      setTransferStatus('error')
+      setTransferError(error instanceof Error ? error.message : 'Transfer failed')
+    }
+  }
+
+  const handleBatchTransfer = async () => {
+    if (!selectedToken || batchTransfers.length === 0) {
+      toast.error('Please select a token and add transfers')
+      return
+    }
+
+    setTransferStatus('processing')
+    setTransferError('')
+
+    try {
+      let successCount = 0
+      let failCount = 0
+
+      for (const transferItem of batchTransfers) {
+        if (!transferItem.address || !transferItem.amount) continue
+
+        try {
+          const success = await transfer(
+            selectedToken!.address,
+            transferItem.amount,
+            transferItem.address,
+            selectedToken!.decimals
+          )
+
+          if (success) {
+            successCount++
+          } else {
+            failCount++
+          }
+        } catch (error) {
+          console.error('Batch transfer error:', error)
+          failCount++
+        }
+      }
+
+      if (successCount > 0) {
+        toast.success(`Batch transfer completed: ${successCount} successful, ${failCount} failed`)
+        setTransferStatus('success')
+        setIsTransferModalOpen(false)
+        setBatchTransfers([{ address: "", amount: "" }])
+        resetTransfer()
+      } else {
+        setTransferStatus('error')
+        setTransferError('All transfers failed')
+      }
+    } catch (error) {
+      console.error('Batch transfer error:', error)
+      setTransferStatus('error')
+      setTransferError(error instanceof Error ? error.message : 'Batch transfer failed')
+    }
+  }
+
+  const handleCSVUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (file.type !== 'text/csv') {
+      setCsvError('Please upload a CSV file')
+      return
+    }
 
     const reader = new FileReader()
     reader.onload = (e) => {
       const text = e.target?.result as string
-      const lines = text.split("\n").filter((line) => line.trim())
-
-      // Skip header if it exists
-      const dataLines = lines[0].toLowerCase().includes("address") ? lines.slice(1) : lines
-
-      const parsedData = dataLines
-        .map((line, index) => {
-          const [address, amount] = line.split(",").map((item) => item.trim())
-          if (!address || !amount) {
-            setCsvError(`Invalid data at line ${index + 1}`)
-            return null
-          }
-          return { address, amount }
-        })
-        .filter(Boolean) as Array<{ address: string; amount: string }>
-
-      if (parsedData.length === 0) {
-        setCsvError("No valid data found in CSV")
-        return
+      const lines = text.split('\n').filter(line => line.trim())
+      
+      const data: Array<{ address: string; amount: string }> = []
+      
+      for (let i = 1; i < lines.length; i++) { // Skip header
+        const [address, amount] = lines[i].split(',').map(s => s.trim())
+        if (address && amount) {
+          data.push({ address, amount })
+        }
       }
 
-      setCsvData(parsedData)
+      setCsvData(data)
+      setCsvFile(file)
+      setCsvError('')
     }
 
     reader.readAsText(file)
   }
 
-  const clearCsvData = () => {
-    setCsvFile(null)
-    setCsvData([])
-    setCsvError("")
-  }
+  const handleAddAuditor = async () => {
+    if (!newAuditorAddress.trim()) {
+      toast.error('Please enter an auditor address')
+      return
+    }
 
-  const handleTransfer = async (token: (typeof mockETokens)[0]) => {
-    setSelectedToken(token)
-    setIsTransferModalOpen(true)
-    setTransferStatus("processing")
-    setTransferStep(0)
-    setTransferError("")
-
-    const steps = [
-      { name: "Preparing transfer", duration: 1500 },
-      { name: "Encrypting transaction", duration: 2000 },
-      { name: "Broadcasting to network", duration: 2500 },
-      { name: "Confirming transaction", duration: 1500 },
-    ]
-
-    try {
-      for (let i = 0; i < steps.length; i++) {
-        setTransferStep(i)
-        await new Promise((resolve) => setTimeout(resolve, steps[i].duration))
-      }
-
-      setTransferStatus("success")
-      setTransferStep(steps.length)
-    } catch (error) {
-      setTransferStatus("error")
-      setTransferError("Transfer failed. Please try again.")
+    const success = await addAuditor(newAuditorAddress.trim())
+    if (success) {
+      setNewAuditorAddress('')
     }
   }
 
-  const resetTransferModal = () => {
-    setIsTransferModalOpen(false)
-    setTransferStatus("idle")
-    setTransferStep(0)
-    setTransferError("")
-    setSelectedToken(null)
+  const handleRemoveAuditor = async (auditorAddress: string) => {
+    const success = await removeAuditor(auditorAddress)
+    if (success) {
+      toast.success('Auditor removed successfully')
+    }
   }
 
-  const retryTransfer = () => {
-    if (selectedToken) {
-      handleTransfer(selectedToken)
-    }
+  // Mostrar pantalla de conexión si no está autenticado o no hay wallet conectada
+  if (!authenticated || !connectedWallet) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <div className="w-16 h-16 bg-muted rounded-full flex items-center justify-center mx-auto">
+            <Zap className="w-8 h-8 text-muted-foreground" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Connect Your External Wallet</h1>
+            <p className="text-muted-foreground mb-4">
+              To access private eToken features, you need to connect an external wallet like MetaMask, WalletConnect, or Coinbase Wallet
+            </p>
+            <div className="space-y-3">
+              <WalletConnectButton />
+              <div className="text-xs text-muted-foreground">
+                Make sure you're on the <strong>Ethereum Sepolia</strong> network (ID: 11155111) for eToken operations
+              </div>
+            </div>
+          </div>
+          {authenticated && !connectedWallet && (
+            <div className="mt-4 p-4 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+              <p className="text-sm text-yellow-600">
+                You're authenticated but need to connect an external wallet to access private features
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
-      <header className="border-b border-border/40 backdrop-blur-sm">
+      <header className="border-b border-border/40">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
-            <Link
-              href="/"
-              className="flex items-center space-x-2 text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <ArrowLeft className="w-5 h-5" />
-              <span>Back</span>
-            </Link>
             <div className="flex items-center space-x-4">
+              <Link href="/">
+                <Button variant="ghost" size="sm">
+                  <ArrowLeft className="w-4 h-4 mr-2" />
+                  Back
+                </Button>
+              </Link>
               <div className="flex items-center space-x-2">
-                <div className="w-6 h-6 bg-accent rounded-md flex items-center justify-center">
-                  <span className="text-xs text-accent-foreground font-bold">H</span>
+                <div className="w-8 h-8 bg-accent rounded-lg flex items-center justify-center">
+                  <span className="text-accent-foreground font-bold text-sm">H</span>
                 </div>
                 <span className="text-lg font-semibold text-foreground">Hushpay</span>
               </div>
+            </div>
+            <div className="flex items-center space-x-4">
+              {/* Network Indicator */}
+              {connectedWallet && (
+                <div className="flex items-center space-x-2">
+                  <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-green-500/10 border border-green-500/20">
+                    <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                    <span className="text-xs font-medium text-green-600">
+                      Ethereum Sepolia (11155111)
+                    </span>
+                  </div>
+                  {connectedWallet.chainId !== "11155111" && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        connectedWallet.switchChain(11155111).catch((error) => {
+                          console.error("❌ Failed to switch to Ethereum Sepolia:", error);
+                          toast.error("Please switch to Ethereum Sepolia network manually");
+                        });
+                      }}
+                      className="text-xs"
+                    >
+                      Switch to Ethereum Sepolia
+                    </Button>
+                  )}
+                </div>
+              )}
               <WalletConnectButton />
             </div>
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="py-12 px-4">
-        <div className="container mx-auto max-w-6xl">
+      <main className="container mx-auto px-4 py-8">
+        <div className="max-w-6xl mx-auto">
+          {/* Welcome Section */}
           <div className="mb-8">
-            <h1 className="text-3xl font-bold text-foreground mb-2">eTokens Dashboard</h1>
-            <p className="text-muted-foreground">Manage your private tokens and authorized auditors</p>
+            <h1 className="text-3xl font-bold text-foreground mb-2">Dashboard</h1>
+            <p className="text-muted-foreground">
+              Manage your private eTokens and confidential transfers
+            </p>
           </div>
 
-          {/* eTokens Grid */}
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
-            {eTokens.map((token) => (
-              <Card key={token.id} className="border-border/40 shadow-sm hover:shadow-md transition-all duration-200">
-                <CardHeader className="pb-4">
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-xl">{token.name}</CardTitle>
-                    <Badge variant="outline" className="text-xs">
+          {/* Token Balances */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            {tokenBalances.map((token) => (
+              <Card key={token.id} className="border-border/40 shadow-lg">
+                <CardHeader className="pb-3">
+                  <CardTitle className="flex items-center justify-between">
+                    <span className="text-lg">{token.name}</span>
+                    <Badge variant="secondary" className="text-xs">
                       {token.originalToken}
                     </Badge>
-                  </div>
-                  <CardDescription>Private token based on {token.originalToken}</CardDescription>
+                  </CardTitle>
+                  <CardDescription>
+                    Private token balance
+                  </CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-4">
-                  {/* Balance Section */}
-                  <div className="space-y-2">
+                <CardContent>
                     <div className="flex items-center justify-between">
-                      <span className="text-sm text-muted-foreground">Balance</span>
-                      {token.isBalanceVisible ? (
-                        <span className="font-mono font-medium">{token.balance}</span>
+                    <div className="text-2xl font-bold text-foreground">
+                      {token.balance.isLoading ? (
+                      <div className="flex items-center space-x-2">
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>Loading...</span>
+                      </div>
+                      ) : token.balance.error ? (
+                        <span className="text-destructive">Error</span>
                       ) : (
-                        <span className="text-muted-foreground">••••••</span>
+                        <span>{token.balance.balance}</span>
                       )}
                     </div>
-
-                    <Dialog>
-                      <DialogTrigger asChild>
-                        <Button variant="outline" size="sm" className="w-full bg-transparent">
-                          {token.isBalanceVisible ? (
-                            <>
-                              <EyeOff className="w-4 h-4 mr-2" />
-                              Hide balance
-                            </>
-                          ) : (
-                            <>
-                              <Eye className="w-4 h-4 mr-2" />
-                              Show balance
-                            </>
-                          )}
-                        </Button>
-                      </DialogTrigger>
-                      <DialogContent>
-                        <DialogHeader>
-                          <DialogTitle>Decrypt balance</DialogTitle>
-                          <DialogDescription>Enter your public key to decrypt and show the balance</DialogDescription>
-                        </DialogHeader>
-                        <div className="space-y-4">
-                          <div className="space-y-2">
-                            <Label htmlFor="public-key">Public key</Label>
-                            <Input
-                              id="public-key"
-                              placeholder="0x..."
-                              value={publicKey}
-                              onChange={(e) => setPublicKey(e.target.value)}
-                            />
-                          </div>
-                          <Button className="w-full" onClick={() => toggleBalanceVisibility(token.id, publicKey)}>
-                            Decrypt
-                          </Button>
-                        </div>
-                      </DialogContent>
-                    </Dialog>
-                  </div>
-
-                  {/* Action Buttons */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <Dialog>
-                      <DialogTrigger asChild>
-                        <Button variant="outline" size="sm">
-                          <Send className="w-4 h-4 mr-2" />
-                          Send
-                        </Button>
-                      </DialogTrigger>
-                      <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
-                        <DialogHeader>
-                          <DialogTitle>Send {token.name}</DialogTitle>
-                          <DialogDescription>
-                            Choose between simple transfer, manual batch, or CSV upload
-                          </DialogDescription>
-                        </DialogHeader>
-
-                        <div className="space-y-6">
-                          {/* Simple Transfer */}
-                          <div className="space-y-4">
-                            <h4 className="font-medium">Simple transfer</h4>
-                            <div className="grid grid-cols-2 gap-4">
-                              <div className="space-y-2">
-                                <Label>Address</Label>
-                                <Input
-                                  placeholder="0x..."
-                                  value={sendAddress}
-                                  onChange={(e) => setSendAddress(e.target.value)}
-                                />
-                              </div>
-                              <div className="space-y-2">
-                                <Label>Amount</Label>
-                                <Input
-                                  placeholder="0.00"
-                                  value={sendAmount}
-                                  onChange={(e) => setSendAmount(e.target.value)}
-                                />
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Manual Batch Transfer */}
-                          <div className="space-y-4">
-                            <div className="flex items-center justify-between">
-                              <h4 className="font-medium">Manual batch transfer</h4>
-                              <Button variant="outline" size="sm" onClick={addBatchTransfer}>
-                                <Plus className="w-4 h-4 mr-2" />
-                                Add recipient
-                              </Button>
-                            </div>
-
-                            <div className="space-y-2 max-h-40 overflow-y-auto">
-                              {batchTransfers.map((transfer, index) => (
-                                <div key={index} className="flex items-center space-x-2">
-                                  <Input
-                                    placeholder="0x..."
-                                    value={transfer.address}
-                                    onChange={(e) => updateBatchTransfer(index, "address", e.target.value)}
-                                    className="flex-1"
-                                  />
-                                  <Input
-                                    placeholder="0.00"
-                                    value={transfer.amount}
-                                    onChange={(e) => updateBatchTransfer(index, "amount", e.target.value)}
-                                    className="w-32"
-                                  />
-                                  {batchTransfers.length > 1 && (
-                                    <Button variant="ghost" size="sm" onClick={() => removeBatchTransfer(index)}>
-                                      <X className="w-4 h-4" />
-                                    </Button>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-
-                          {/* CSV Batch Transfer */}
-                          <div className="space-y-4 border-t pt-4">
-                            <div className="flex items-center justify-between">
-                              <h4 className="font-medium">CSV batch transfer</h4>
-                              {csvFile && (
-                                <Button variant="outline" size="sm" onClick={clearCsvData}>
-                                  <X className="w-4 h-4 mr-2" />
-                                  Clear CSV
-                                </Button>
-                              )}
-                            </div>
-
-                            {!csvFile ? (
-                              <div className="border-2 border-dashed border-border rounded-lg p-6 text-center">
-                                <Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
-                                <p className="text-sm text-muted-foreground mb-2">
-                                  Upload a CSV file with addresses and amounts
-                                </p>
-                                <p className="text-xs text-muted-foreground mb-4">
-                                  Format: address,amount (one per line)
-                                </p>
-                                <Label htmlFor="csv-upload" className="cursor-pointer">
-                                  <Button variant="outline" size="sm" asChild>
-                                    <span>
-                                      <FileText className="w-4 h-4 mr-2" />
-                                      Choose CSV file
-                                    </span>
-                                  </Button>
-                                </Label>
-                                <Input
-                                  id="csv-upload"
-                                  type="file"
-                                  accept=".csv"
-                                  onChange={handleCsvUpload}
-                                  className="hidden"
-                                />
-                              </div>
-                            ) : (
-                              <div className="space-y-3">
-                                <div className="flex items-center space-x-2 p-3 bg-muted/30 rounded-lg">
-                                  <FileText className="w-4 h-4 text-accent" />
-                                  <span className="text-sm font-medium">{csvFile.name}</span>
-                                  <Badge variant="outline" className="text-xs">
-                                    {csvData.length} transfers
-                                  </Badge>
-                                </div>
-
-                                {csvError && (
-                                  <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
-                                    <p className="text-sm text-destructive">{csvError}</p>
-                                  </div>
-                                )}
-
-                                {csvData.length > 0 && (
-                                  <div className="max-h-40 overflow-y-auto border rounded-lg">
-                                    <div className="grid grid-cols-2 gap-2 p-2 bg-muted/20 border-b text-xs font-medium">
-                                      <span>Address</span>
-                                      <span>Amount</span>
-                                    </div>
-                                    {csvData.slice(0, 10).map((item, index) => (
-                                      <div
-                                        key={index}
-                                        className="grid grid-cols-2 gap-2 p-2 text-sm border-b last:border-b-0"
-                                      >
-                                        <span className="font-mono text-xs truncate">{item.address}</span>
-                                        <span className="font-mono">{item.amount}</span>
-                                      </div>
-                                    ))}
-                                    {csvData.length > 10 && (
-                                      <div className="p-2 text-center text-xs text-muted-foreground">
-                                        ... and {csvData.length - 10} more transfers
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-
-                          <Button
-                            className="w-full bg-accent hover:bg-accent/90"
-                            disabled={!sendAddress && batchTransfers.every((t) => !t.address) && csvData.length === 0}
-                            onClick={() => handleTransfer(token)}
-                          >
-                            Confirm send
-                          </Button>
-                        </div>
-                      </DialogContent>
-                    </Dialog>
-
-                    <Button variant="outline" size="sm">
-                      <ArrowUpDown className="w-4 h-4 mr-2" />
-                      To ERC-20
+                    <Button 
+                      variant="ghost"
+                      size="sm" 
+                      onClick={() => toggleBalanceVisibility(token.id)}
+                      disabled={token.balance.isLoading || token.balance.isDecrypting}
+                    >
+                      {token.balance.isDecrypting ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : token.balance.decryptedBalance !== null ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
                     </Button>
                   </div>
                 </CardContent>
               </Card>
             ))}
-          </div>
+                  </div>
 
-          {/* Auditors Section */}
-          <Card className="border-border/40 shadow-sm">
-            <CardHeader>
-              <div className="flex items-center justify-between">
+          {/* Actions Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            {/* Transfer Section */}
+            <Card className="border-border/40 shadow-lg">
+              <CardHeader>
+                <CardTitle className="flex items-center space-x-2">
+                  <Send className="w-5 h-5" />
+                  <span>Send eTokens</span>
+                </CardTitle>
+                <CardDescription>
+                  Send private tokens to another address
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
                 <div>
-                  <CardTitle>Authorized auditors</CardTitle>
-                  <CardDescription>Manage who can audit your private transactions</CardDescription>
+                  <Label htmlFor="token-select">Select Token</Label>
+                  <select
+                    id="token-select"
+                    className="w-full mt-1 p-2 border border-border rounded-md bg-background text-foreground"
+                    onChange={(e) => {
+                      const token = TOKENS.find(t => t.id === e.target.value)
+                      setSelectedToken(token || null)
+                    }}
+                  >
+                    <option value="">Choose a token</option>
+                    {TOKENS.map((token) => (
+                      <option key={token.id} value={token.id}>
+                        {token.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <Dialog>
-                  <DialogTrigger asChild>
-                    <Button variant="outline">
-                      <Plus className="w-4 h-4 mr-2" />
-                      Add auditor
+
+                <div>
+                  <Label htmlFor="amount">Amount</Label>
+                                <Input
+                    id="amount"
+                    type="number"
+                                  placeholder="0.00"
+                                  value={sendAmount}
+                                  onChange={(e) => setSendAmount(e.target.value)}
+                                />
+                          </div>
+
+                <div>
+                  <Label htmlFor="address">Recipient Address</Label>
+                                  <Input
+                    id="address"
+                                    placeholder="0x..."
+                    value={sendAddress}
+                    onChange={(e) => setSendAddress(e.target.value)}
+                  />
+                          </div>
+
+                <Button
+                  onClick={() => setIsTransferModalOpen(true)}
+                  disabled={!selectedToken || !sendAmount || !sendAddress}
+                  className="w-full"
+                >
+                  Send Privately
+                                </Button>
+              </CardContent>
+            </Card>
+
+            {/* Auditors Section */}
+            <Card className="border-border/40 shadow-lg">
+              <CardHeader>
+                <CardTitle className="flex items-center space-x-2">
+                  <UserCheck className="w-5 h-5" />
+                  <span>Auditors</span>
+                </CardTitle>
+                <CardDescription>
+                  Manage who can view your private balances
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div>
+                  <Label htmlFor="auditor-address">Auditor Address</Label>
+                  <div className="flex space-x-2 mt-1">
+                                <Input
+                      id="auditor-address"
+                      placeholder="0x..."
+                      value={newAuditorAddress}
+                      onChange={(e) => setNewAuditorAddress(e.target.value)}
+                    />
+                    <Button
+                      onClick={handleAddAuditor}
+                      disabled={!newAuditorAddress.trim() || auditorsLoading}
+                      size="sm"
+                    >
+                      <Plus className="w-4 h-4" />
                     </Button>
-                  </DialogTrigger>
-                  <DialogContent>
-                    <DialogHeader>
-                      <DialogTitle>Add auditor</DialogTitle>
-                      <DialogDescription>Enter the address of the new authorized auditor</DialogDescription>
-                    </DialogHeader>
-                    <div className="space-y-4">
-                      <div className="space-y-2">
-                        <Label>Auditor address</Label>
-                        <Input
-                          placeholder="0x..."
-                          value={newAuditorAddress}
-                          onChange={(e) => setNewAuditorAddress(e.target.value)}
-                        />
-                      </div>
-                      <Button className="w-full" onClick={addAuditor}>
-                        Authorize auditor
-                      </Button>
-                    </div>
-                  </DialogContent>
-                </Dialog>
-              </div>
+                              </div>
+                                </div>
+
+                <div className="space-y-2">
+                  <Label>Authorized Auditors</Label>
+                  {auditorsLoading ? (
+                    <div className="flex items-center space-x-2">
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Loading...</span>
+                                  </div>
+                  ) : auditors.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No auditors authorized</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {auditors.map((auditor) => (
+                        <div
+                          key={auditor.address}
+                          className="flex items-center justify-between p-2 bg-muted rounded-md"
+                        >
+                          <div>
+                            <p className="text-sm font-medium">{auditor.name}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {auditor.address.slice(0, 6)}...{auditor.address.slice(-4)}
+                            </p>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleRemoveAuditor(auditor.address)}
+                            disabled={auditorsLoading}
+                          >
+                            <X className="w-4 h-4" />
+                          </Button>
+                                      </div>
+                                    ))}
+                                      </div>
+                                    )}
+                                  </div>
+              </CardContent>
+            </Card>
+                          </div>
+
+          {/* Batch Transfer Section */}
+          <Card className="border-border/40 shadow-lg mb-8">
+            <CardHeader>
+              <CardTitle className="flex items-center space-x-2">
+                <Upload className="w-5 h-5" />
+                <span>Batch Transfer</span>
+              </CardTitle>
+              <CardDescription>
+                Send multiple transfers at once using CSV or manual entry
+              </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {auditors.map((auditor) => (
-                  <div key={auditor.address} className="flex items-center justify-between p-3 bg-muted/30 rounded-lg">
-                    <div className="flex items-center space-x-3">
-                      <UserCheck className="w-5 h-5 text-accent" />
-                      <div>
-                        <p className="font-medium">{auditor.name}</p>
-                        <p className="text-sm text-muted-foreground font-mono">{auditor.address}</p>
-                      </div>
+            <CardContent className="space-y-4">
+                <div>
+                <Label htmlFor="batch-token-select">Select Token</Label>
+                <select
+                  id="batch-token-select"
+                  className="w-full mt-1 p-2 border border-border rounded-md bg-background text-foreground"
+                  onChange={(e) => {
+                    const token = TOKENS.find(t => t.id === e.target.value)
+                    setSelectedToken(token || null)
+                  }}
+                >
+                  <option value="">Choose a token</option>
+                  {TOKENS.map((token) => (
+                    <option key={token.id} value={token.id}>
+                      {token.name}
+                    </option>
+                  ))}
+                </select>
+                </div>
+
+              <div>
+                <Label>Upload CSV</Label>
+                <div className="mt-1">
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleCSVUpload}
+                    className="hidden"
+                    id="csv-upload"
+                  />
+                  <label
+                    htmlFor="csv-upload"
+                    className="cursor-pointer inline-flex items-center px-4 py-2 border border-border rounded-md bg-background text-foreground hover:bg-muted"
+                  >
+                    <FileText className="w-4 h-4 mr-2" />
+                    Choose CSV file
+                  </label>
+                  {csvFile && (
+                    <span className="ml-2 text-sm text-muted-foreground">
+                      {csvFile.name}
+                    </span>
+                  )}
                     </div>
+                {csvError && (
+                  <p className="text-sm text-destructive mt-1">{csvError}</p>
+                )}
+              </div>
+
+                      <div>
+                <Label>Manual Entries</Label>
+                <div className="space-y-2 mt-1">
+                  {batchTransfers.map((transfer, index) => (
+                    <div key={index} className="flex space-x-2">
+                      <Input
+                        placeholder="Address"
+                        value={transfer.address}
+                        onChange={(e) => {
+                          const newTransfers = [...batchTransfers]
+                          newTransfers[index].address = e.target.value
+                          setBatchTransfers(newTransfers)
+                        }}
+                      />
+                      <Input
+                        placeholder="Amount"
+                        type="number"
+                        value={transfer.amount}
+                        onChange={(e) => {
+                          const newTransfers = [...batchTransfers]
+                          newTransfers[index].amount = e.target.value
+                          setBatchTransfers(newTransfers)
+                        }}
+                      />
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => removeAuditor(auditor.address)}
-                      className="text-destructive hover:text-destructive"
+                        onClick={() => {
+                          setBatchTransfers(batchTransfers.filter((_, i) => i !== index))
+                        }}
                     >
-                      Revoke
+                        <X className="w-4 h-4" />
                     </Button>
                   </div>
                 ))}
-
-                {auditors.length === 0 && (
-                  <div className="text-center py-8 text-muted-foreground">No authorized auditors</div>
-                )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setBatchTransfers([...batchTransfers, { address: "", amount: "" }])}
+                  >
+                    <Plus className="w-4 h-4 mr-2" />
+                    Add Transfer
+                  </Button>
               </div>
+              </div>
+
+              <Button
+                onClick={handleBatchTransfer}
+                disabled={!selectedToken || batchTransfers.length === 0}
+                className="w-full"
+              >
+                Send Batch Transfer
+              </Button>
             </CardContent>
           </Card>
         </div>
       </main>
 
+      {/* Transfer Modal */}
       <Dialog open={isTransferModalOpen} onOpenChange={setIsTransferModalOpen}>
-        <DialogContent className="max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-center">
-              {transferStatus === "success"
-                ? "Transfer Complete!"
-                : transferStatus === "error"
-                  ? "Transfer Failed"
-                  : "Processing Transfer"}
-            </DialogTitle>
-            <DialogDescription className="text-center">
-              {transferStatus === "success"
-                ? `Your ${selectedToken?.name} has been sent successfully`
-                : transferStatus === "error"
-                  ? "There was an issue with your transfer"
-                  : "Please wait while we process your transfer"}
+            <DialogTitle>Confirm Transfer</DialogTitle>
+            <DialogDescription>
+              Review your confidential transfer details
             </DialogDescription>
           </DialogHeader>
-
-          <div className="py-6">
-            {transferStatus === "processing" && (
-              <div className="space-y-6">
-                {[
-                  "Preparing transfer",
-                  "Encrypting transaction",
-                  "Broadcasting to network",
-                  "Confirming transaction",
-                ].map((step, index) => (
-                  <div key={index} className="flex items-center space-x-3">
-                    <div className="flex-shrink-0">
-                      {index < transferStep ? (
-                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center">
-                          <Check className="w-3 h-3 text-white" />
+          <div className="space-y-4">
+            {transferStatus === 'idle' && (
+              <div className="space-y-2">
+                <div className="flex justify-between">
+                  <span>Token:</span>
+                  <span className="font-medium">{selectedToken?.name}</span>
                         </div>
-                      ) : index === transferStep ? (
-                        <div className="w-6 h-6 bg-accent rounded-full flex items-center justify-center animate-pulse">
-                          <Clock className="w-3 h-3 text-white animate-spin" />
+                <div className="flex justify-between">
+                  <span>Amount:</span>
+                  <span className="font-medium">{sendAmount}</span>
                         </div>
-                      ) : (
-                        <div className="w-6 h-6 bg-muted rounded-full border-2 border-border" />
-                      )}
-                    </div>
-                    <span
-                      className={`text-sm ${
-                        index < transferStep
-                          ? "text-green-500"
-                          : index === transferStep
-                            ? "text-accent"
-                            : "text-muted-foreground"
-                      }`}
-                    >
-                      {step}
+                <div className="flex justify-between">
+                  <span>To:</span>
+                  <span className="font-medium text-sm">
+                    {sendAddress.slice(0, 6)}...{sendAddress.slice(-4)}
                     </span>
                   </div>
-                ))}
+                <Button onClick={handleTransfer} className="w-full">
+                  Confirm Transfer
+                </Button>
               </div>
             )}
 
-            {transferStatus === "success" && (
+            {transferStatus === 'processing' && (
               <div className="text-center space-y-4">
-                <div className="w-16 h-16 bg-green-500 rounded-full flex items-center justify-center mx-auto">
-                  <CheckCircle2 className="w-8 h-8 text-white" />
+                <div className="flex items-center justify-center">
+                  <RefreshCw className="w-8 h-8 animate-spin" />
                 </div>
-                <div className="space-y-2">
-                  <p className="text-sm text-muted-foreground">Transaction Hash:</p>
-                  <p className="text-xs font-mono bg-muted p-2 rounded break-all">
-                    0x1234567890abcdef1234567890abcdef12345678
+                <div>
+                  <p className="font-medium">Processing Transfer</p>
+                  <p className="text-sm text-muted-foreground">
+                    {isEncrypting ? 'Encrypting amount...' : 
+                     isConfirming ? 'Confirming transaction...' : 
+                     'Preparing transaction...'}
                   </p>
                 </div>
               </div>
             )}
 
-            {transferStatus === "error" && (
+            {transferStatus === 'success' && (
               <div className="text-center space-y-4">
-                <div className="w-16 h-16 bg-destructive rounded-full flex items-center justify-center mx-auto">
-                  <AlertCircle className="w-8 h-8 text-white" />
+                <div className="flex items-center justify-center">
+                  <CheckCircle2 className="w-8 h-8 text-green-500" />
                 </div>
-                <p className="text-sm text-destructive">{transferError}</p>
+                <div>
+                  <p className="font-medium text-green-500">Transfer Successful!</p>
+                  <p className="text-sm text-muted-foreground">
+                    Transaction hash: {hash?.slice(0, 10)}...
+                  </p>
               </div>
-            )}
-          </div>
-
-          <div className="flex gap-2">
-            {transferStatus === "success" && (
-              <>
-                <Button variant="outline" className="flex-1 bg-transparent" onClick={resetTransferModal}>
+                <Button onClick={() => setIsTransferModalOpen(false)} className="w-full">
                   Close
                 </Button>
-                <Button className="flex-1 bg-accent hover:bg-accent/90" onClick={resetTransferModal}>
-                  Done
-                </Button>
-              </>
+              </div>
             )}
 
-            {transferStatus === "error" && (
-              <>
-                <Button variant="outline" className="flex-1 bg-transparent" onClick={resetTransferModal}>
-                  Cancel
+            {transferStatus === 'error' && (
+              <div className="text-center space-y-4">
+                <div className="flex items-center justify-center">
+                  <AlertCircle className="w-8 h-8 text-red-500" />
+                </div>
+                <div>
+                  <p className="font-medium text-red-500">Transfer Failed</p>
+                  <p className="text-sm text-muted-foreground">{transferError}</p>
+                </div>
+                <Button onClick={() => setIsTransferModalOpen(false)} className="w-full">
+                  Close
                 </Button>
-                <Button className="flex-1 bg-accent hover:bg-accent/90" onClick={retryTransfer}>
-                  Retry
-                </Button>
-              </>
-            )}
-
-            {transferStatus === "processing" && (
-              <Button variant="outline" className="w-full bg-transparent" disabled>
-                Processing...
-              </Button>
+              </div>
             )}
           </div>
         </DialogContent>
       </Dialog>
-
-      {/* Footer */}
-      <footer className="border-t border-border/40 py-8 px-4 mt-12">
-        <div className="container mx-auto max-w-4xl">
-          <div className="flex flex-col md:flex-row items-center justify-between">
-            <div className="flex items-center space-x-6 mb-4 md:mb-0">
-              <Link href="/docs" className="text-muted-foreground hover:text-foreground transition-colors">
-                Documentation
-              </Link>
-              <Link href="/support" className="text-muted-foreground hover:text-foreground transition-colors">
-                Support
-              </Link>
-            </div>
-            <div className="text-sm text-muted-foreground">Privacy guaranteed by Zama</div>
-          </div>
-        </div>
-      </footer>
     </div>
   )
 }

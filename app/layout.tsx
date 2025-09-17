@@ -1,17 +1,16 @@
-import type React from "react"
 import type { Metadata } from "next"
 import { GeistSans } from "geist/font/sans"
 import { GeistMono } from "geist/font/mono"
-import { Analytics } from "@vercel/analytics/next"
-import { Suspense } from "react"
+import { cn } from "@/lib/utils"
 import Providers from "./PrivyProvider"
+import { FhevmProvider } from "./FhevmProvider"
+import { Toaster } from "sonner"
 import "./globals.css"
+import Script from "next/script"
 
 export const metadata: Metadata = {
-  title: "Hushpay - Total Privacy for Your Tokens",
-  description:
-    "Convert any ERC-20 token from Lisk into a private token using Zama technology and recover it whenever you want",
-  generator: "v0.app",
+  title: "Hushpay - Private Token Management",
+  description: "Secure and private token management with FHEVM technology",
 }
 
 export default function RootLayout({
@@ -20,12 +19,26 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className="dark">
-      <body className={`font-sans ${GeistSans.variable} ${GeistMono.variable}`}>
-        <Suspense fallback={null}>
-          <Providers>{children}</Providers>
-        </Suspense>
-        <Analytics />
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <Script
+          src="https://cdn.zama.ai/relayer-sdk-js/0.1.0-9/relayer-sdk-js.umd.cjs"
+          strategy="beforeInteractive"
+        />
+      </head>
+      <body
+        className={cn(
+          "min-h-screen bg-background font-sans antialiased",
+          GeistSans.variable,
+          GeistMono.variable
+        )}
+      >
+        <Providers>
+          <FhevmProvider>
+            {children}
+            <Toaster />
+          </FhevmProvider>
+        </Providers>
       </body>
     </html>
   )
